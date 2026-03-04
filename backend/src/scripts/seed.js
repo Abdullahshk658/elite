@@ -1,12 +1,9 @@
-﻿import path from 'node:path';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { randomUUID } from 'node:crypto';
 import dotenv from 'dotenv';
-import mongoose from 'mongoose';
 import bcrypt from 'bcryptjs';
-import Category from '../models/Category.js';
-import Product from '../models/Product.js';
-import User from '../models/User.js';
-import Order from '../models/Order.js';
+import { connectDB, closeDB, query } from '../config/db.js';
 import { seedCategories, seedProducts, seedUsers } from '../data/seedData.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -15,21 +12,13 @@ const rootEnvPath = path.resolve(__dirname, '../../../.env');
 const backendEnvPath = path.resolve(__dirname, '../../.env');
 
 dotenv.config({ path: rootEnvPath });
-dotenv.config({ path: backendEnvPath, override: false });
-
-const mongoUri = process.env.MONGO_URI || 'mongodb://127.0.0.1:27017/elitekicks';
-
-const connect = async () => {
-  await mongoose.connect(mongoUri);
-};
+dotenv.config({ path: backendEnvPath, override: true });
 
 const clearData = async () => {
-  await Promise.all([
-    Order.deleteMany({}),
-    Product.deleteMany({}),
-    Category.deleteMany({}),
-    User.deleteMany({})
-  ]);
+  await query('DELETE FROM orders');
+  await query('DELETE FROM products');
+  await query('DELETE FROM categories');
+  await query('DELETE FROM users');
 };
 
 const insertCategories = async () => {
@@ -37,63 +26,98 @@ const insertCategories = async () => {
   const created = [];
 
   for (const entry of seedCategories) {
+    const categoryId = randomUUID();
     const parentId = entry.parentSlug ? slugToCategoryId.get(entry.parentSlug) || null : null;
 
-    const category = await Category.create({
-      name: entry.name,
-      slug: entry.slug,
-      parent: parentId,
-      image: entry.image,
-      level: entry.level
-    });
+    await query(
+      `
+        INSERT INTO categories (id, name, slug, parent_id, image, level)
+        VALUES ($1, $2, $3, $4, $5, $6)
+      `,
+      [categoryId, entry.name, entry.slug, parentId, entry.image || '', entry.level]
+    );
 
-    slugToCategoryId.set(entry.slug, category._id);
-    created.push(category);
+    slugToCategoryId.set(entry.slug, categoryId);
+    created.push({ id: categoryId, slug: entry.slug });
   }
 
   return { created, slugToCategoryId };
 };
 
 const insertProducts = async (slugToCategoryId) => {
-  const docs = seedProducts.map((entry) => {
-    const category = slugToCategoryId.get(entry.categorySlug);
-    if (!category) {
+  const created = [];
+
+  for (const entry of seedProducts) {
+    const categoryId = slugToCategoryId.get(entry.categorySlug);
+    if (!categoryId) {
       throw new Error(`Unknown category slug: ${entry.categorySlug}`);
     }
 
-    return {
-      name: entry.name,
-      slug: entry.slug,
-      sku: entry.sku,
-      description: entry.description,
-      price: entry.price,
-      salePrice: entry.salePrice,
-      category,
-      brand: entry.brand,
-      sizes: entry.sizes,
-      images: entry.images,
-      qualityTag: entry.qualityTag,
-      isFeatured: entry.isFeatured,
-      isTrending: entry.isTrending,
-      tags: entry.tags
-    };
-  });
+    const productId = randomUUID();
+    await query(
+      `
+        INSERT INTO products (
+          id, name, slug, sku, description, price, sale_price, category_id, brand,
+          sizes, images, quality_tag, is_featured, is_trending, tags
+        )
+        VALUES (
+          $1, $2, $3, $4, $5, $6, $7, $8, $9,
+          $10::jsonb, $11::jsonb, $12, $13, $14, $15::text[]
+        )
+      `,
+      [
+        productId,
+        entry.name,
+        entry.slug,
+        entry.sku,
+        entry.description,
+        entry.price,
+        entry.salePrice,
+        categoryId,
+        entry.brand,
+        JSON.stringify(entry.sizes || []),
+        JSON.stringify(entry.images || []),
+        entry.qualityTag,
+        Boolean(entry.isFeatured),
+        Boolean(entry.isTrending),
+        entry.tags || []
+      ]
+    );
 
-  const created = await Product.insertMany(docs);
+    created.push({
+      id: productId,
+      name: entry.name,
+      price: entry.price,
+      salePrice: entry.salePrice
+    });
+  }
+
   return created;
 };
 
 const insertUsers = async () => {
-  const docs = await Promise.all(
-    seedUsers.map(async (entry) => ({
-      name: entry.name,
-      email: entry.email,
-      password: await bcrypt.hash(entry.password, 10),
-      isAdmin: entry.isAdmin
-    }))
-  );
+  const created = [];
 
-  return User.insertMany(docs);
+  for (const entry of seedUsers) {
+    const userId = randomUUID();
+    const hashedPassword = await bcrypt.hash(entry.password, 10);
+    await query(
+      `
+        INSERT INTO users (id, name, email, password, is_admin)
+        VALUES ($1, $2, $3, $4, $5)
+      `,
+      [userId, entry.name, entry.email.toLowerCase(), hashedPassword, Boolean(entry.isAdmin)]
+    );
+
+    created.push({
+      id: userId,
+      name: entry.name,
+      email: entry.email.toLowerCase(),
+      isAdmin: Boolean(entry.isAdmin)
+    });
+  }
+
+  return created;
 };
 
 const insertSampleOrder = async (products, users) => {
@@ -104,13 +128,13 @@ const insertSampleOrder = async (products, users) => {
 
   const orderItems = [
     {
-      product: products[0]._id,
+      product: products[0].id,
       size: '42',
       qty: 1,
       price: products[0].salePrice || products[0].price
     },
     {
-      product: products[1]._id,
+      product: products[1].id,
       size: '43',
       qty: 1,
       price: products[1].salePrice || products[1].price
@@ -118,31 +142,46 @@ const insertSampleOrder = async (products, users) => {
   ];
 
   const total = orderItems.reduce((sum, item) => sum + item.price * item.qty, 0) + 250;
+  const orderId = randomUUID();
 
-  return Order.create({
-    customer: {
-      name: customer.name,
-      email: customer.email,
-      phone: '+92 300 1234567'
-    },
-    shippingAddress: {
-      street: 'House 22, Block 5',
-      city: 'Karachi',
-      province: 'Sindh',
-      postalCode: '75400'
-    },
-    items: orderItems,
-    total,
-    paymentMethod: 'COD',
-    status: 'Pending',
-    whatsappNotified: false
-  });
+  await query(
+    `
+      INSERT INTO orders (
+        id, customer, shipping_address, items, total,
+        payment_method, status, whatsapp_notified
+      )
+      VALUES (
+        $1, $2::jsonb, $3::jsonb, $4::jsonb, $5,
+        $6, $7, $8
+      )
+    `,
+    [
+      orderId,
+      JSON.stringify({
+        name: customer.name,
+        email: customer.email,
+        phone: '+92 300 1234567'
+      }),
+      JSON.stringify({
+        street: 'House 22, Block 5',
+        city: 'Karachi',
+        province: 'Sindh',
+        postalCode: '75400'
+      }),
+      JSON.stringify(orderItems),
+      total,
+      'COD',
+      'Pending',
+      false
+    ]
+  );
+
+  return orderId;
 };
 
 const run = async () => {
   const mode = process.argv[2] || 'seed';
-
-  await connect();
+  await connectDB();
 
   if (mode === '--clear') {
     await clearData();
@@ -171,5 +210,5 @@ run()
     process.exitCode = 1;
   })
   .finally(async () => {
-    await mongoose.disconnect();
+    await closeDB();
   });

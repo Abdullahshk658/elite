@@ -1,4 +1,6 @@
 import express from 'express';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import dotenv from 'dotenv';
 import cors from 'cors';
 import morgan from 'morgan';
@@ -10,7 +12,13 @@ import adminRoutes from './src/routes/admin.js';
 import categoryRoutes from './src/routes/categories.js';
 import { notFound, errorHandler } from './src/middleware/error.js';
 
-dotenv.config();
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const rootEnvPath = path.resolve(__dirname, '../.env');
+const backendEnvPath = path.resolve(__dirname, './.env');
+
+dotenv.config({ path: rootEnvPath });
+dotenv.config({ path: backendEnvPath, override: true });
 
 const app = express();
 

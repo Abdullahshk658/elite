@@ -4,7 +4,7 @@ Full-stack e-commerce boilerplate for the Pakistani sneaker market.
 
 ## Stack
 - Frontend: Next.js 14 (App Router) + Tailwind + Redux Toolkit + RTK Query
-- Backend: Node.js + Express + MongoDB (Mongoose)
+- Backend: Node.js + Express + PostgreSQL (`pg`)
 - Auth: JWT + bcrypt
 - Media: Cloudinary
 
@@ -13,14 +13,14 @@ Full-stack e-commerce boilerplate for the Pakistani sneaker market.
    - `npm install`
 2. Copy environment variables
    - Create `.env` at repo root using `.env.example`
-3. Start MongoDB
-   - Local MongoDB service, or Docker:
-   - `docker run -d --name elitekicks-mongo -p 27017:27017 mongo:7`
+3. Configure PostgreSQL
+   - Use Supabase or any PostgreSQL instance
+   - Set `DATABASE_URL` in `.env`
+   - For Supabase: `postgresql://postgres:<password>@db.<project-ref>.supabase.co:5432/postgres?sslmode=require`
 4. Seed sample data
    - `npm run seed`
 5. Run both apps
    - `npm run dev`
-   - If MongoDB is not installed locally: `npm run dev:memory`
 
 Frontend: `http://localhost:3000`
 Backend API: `http://localhost:5000/api`
@@ -31,8 +31,6 @@ Backend API: `http://localhost:5000/api`
 
 ## Useful Scripts
 - `npm run dev` - start frontend + backend
-- `npm run dev:memory` - start frontend + backend with in-memory Mongo + auto-seed
-- `npm run smoke:memory` - run API smoke checks on in-memory Mongo and exit
 - `npm run build` - build frontend
 - `npm run seed` - clear and import sample categories/products/users/order
 - `npm run seed:clear` - clear categories/products/users/orders

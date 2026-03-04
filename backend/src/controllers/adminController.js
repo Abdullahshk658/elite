@@ -1,8 +1,9 @@
-import Order from '../models/Order.js';
-import Product from '../models/Product.js';
+import { randomUUID } from 'node:crypto';
 import { asyncHandler } from '../middleware/async.js';
 import { uploadBufferToCloudinary } from '../utils/cloudinary.js';
 import { slugify } from '../utils/slug.js';
+import { query } from '../config/db.js';
+import { serializeOrder, serializeProduct } from '../utils/serializers.js';
 
 const mapImages = async (files = []) => {
   if (!files.length) return [];
@@ -27,11 +28,15 @@ const parseJSON = (value, fallback) => {
   }
 };
 
+const ensureArray = (value) => (Array.isArray(value) ? value : []);
+
 const normalizePayload = (payload) => ({
   ...payload,
   price: payload.price !== undefined ? Number(payload.price) : undefined,
   salePrice:
-    payload.salePrice === '' || payload.salePrice === null || payload.salePrice === undefined
+    payload.salePrice === undefined
+      ? undefined
+      : payload.salePrice === '' || payload.salePrice === null
       ? null
       : Number(payload.salePrice),
   isFeatured:
@@ -42,10 +47,33 @@ const normalizePayload = (payload) => ({
     payload.isTrending === undefined
       ? undefined
       : payload.isTrending === true || payload.isTrending === 'true',
-  sizes: parseJSON(payload.sizes, payload.sizes || []),
-  images: parseJSON(payload.images, payload.images || []),
-  tags: parseJSON(payload.tags, payload.tags || [])
+  category:
+    typeof payload.category === 'object' && payload.category !== null
+      ? payload.category._id || payload.category.id
+      : payload.category,
+  sizes: ensureArray(parseJSON(payload.sizes, [])),
+  images: ensureArray(parseJSON(payload.images, [])),
+  tags: ensureArray(parseJSON(payload.tags, [])).map((tag) => String(tag))
 });
+
+const fetchProductById = async (id) => {
+  const result = await query(
+    `
+      SELECT
+        p.*,
+        c.id AS category_ref_id,
+        c.name AS category_name,
+        c.slug AS category_slug
+      FROM products p
+      LEFT JOIN categories c ON c.id = p.category_id
+      WHERE p.id = $1
+      LIMIT 1
+    `,
+    [id]
+  );
+
+  return result.rows[0] ? serializeProduct(result.rows[0], { withCategory: true }) : null;
+};
 
 export const createProduct = asyncHandler(async (req, res) => {
   const images = await mapImages(req.files || []);
@@ -53,18 +81,59 @@ export const createProduct = asyncHandler(async (req, res) => {
 
   const name = payload.name;
   const slug = payload.slug || slugify(name);
+  const categoryId = payload.category;
 
-  const product = await Product.create({
-    ...payload,
-    slug,
-    images: images.length ? images : payload.images || []
-  });
+  const inserted = await query(
+    `
+      INSERT INTO products (
+        id,
+        name,
+        slug,
+        sku,
+        description,
+        price,
+        sale_price,
+        category_id,
+        brand,
+        sizes,
+        images,
+        quality_tag,
+        is_featured,
+        is_trending,
+        tags
+      )
+      VALUES (
+        $1, $2, $3, $4, $5, $6, $7, $8, $9,
+        $10::jsonb, $11::jsonb, $12, $13, $14, $15::text[]
+      )
+      RETURNING id
+    `,
+    [
+      randomUUID(),
+      payload.name,
+      slug,
+      payload.sku,
+      payload.description,
+      payload.price,
+      payload.salePrice,
+      categoryId,
+      payload.brand,
+      JSON.stringify(payload.sizes || []),
+      JSON.stringify(images.length ? images : payload.images || []),
+      payload.qualityTag,
+      payload.isFeatured ?? false,
+      payload.isTrending ?? false,
+      payload.tags || []
+    ]
+  );
+
+  const product = await fetchProductById(inserted.rows[0].id);
 
   res.status(201).json(product);
 });
 
 export const updateProduct = asyncHandler(async (req, res) => {
-  const product = await Product.findById(req.params.id);
+  const product = await fetchProductById(req.params.id);
   if (!product) {
     const error = new Error('Product not found');
     error.statusCode = 404;
@@ -78,62 +147,189 @@ export const updateProduct = asyncHandler(async (req, res) => {
     updates.slug = slugify(updates.name);
   }
 
-  Object.assign(product, updates);
   if (images.length) {
-    product.images = images;
+    updates.images = images;
   }
 
-  await product.save();
+  const updatesMap = [
+    ['name', updates.name],
+    ['slug', updates.slug],
+    ['sku', updates.sku],
+    ['description', updates.description],
+    ['price', updates.price],
+    ['sale_price', updates.salePrice],
+    ['category_id', updates.category],
+    ['brand', updates.brand],
+    ['quality_tag', updates.qualityTag],
+    ['is_featured', updates.isFeatured],
+    ['is_trending', updates.isTrending]
+  ];
 
-  res.json(product);
+  const setClauses = [];
+  const params = [];
+
+  updatesMap.forEach(([column, value]) => {
+    if (value !== undefined) {
+      params.push(value);
+      setClauses.push(`${column} = $${params.length}`);
+    }
+  });
+
+  if (updates.sizes !== undefined) {
+    params.push(JSON.stringify(updates.sizes || []));
+    setClauses.push(`sizes = $${params.length}::jsonb`);
+  }
+
+  if (updates.images !== undefined) {
+    params.push(JSON.stringify(updates.images || []));
+    setClauses.push(`images = $${params.length}::jsonb`);
+  }
+
+  if (updates.tags !== undefined) {
+    params.push(updates.tags || []);
+    setClauses.push(`tags = $${params.length}::text[]`);
+  }
+
+  if (setClauses.length > 0) {
+    params.push(req.params.id);
+    await query(
+      `
+        UPDATE products
+        SET ${setClauses.join(', ')}, updated_at = NOW()
+        WHERE id = $${params.length}
+      `,
+      params
+    );
+  }
+
+  const updated = await fetchProductById(req.params.id);
+  res.json(updated);
 });
 
 export const deleteProduct = asyncHandler(async (req, res) => {
-  const product = await Product.findById(req.params.id);
+  const product = await fetchProductById(req.params.id);
   if (!product) {
     const error = new Error('Product not found');
     error.statusCode = 404;
     throw error;
   }
 
-  await product.deleteOne();
+  await query('DELETE FROM products WHERE id = $1', [req.params.id]);
 
   res.json({ message: 'Product removed' });
 });
 
 export const getAdminOrders = asyncHandler(async (req, res) => {
-  const orders = await Order.find({}).sort({ createdAt: -1 }).populate('items.product', 'name').lean();
-  res.json(orders);
+  const result = await query(
+    `
+      SELECT id, customer, shipping_address, items, total, payment_method, status, whatsapp_notified, created_at, updated_at
+      FROM orders
+      ORDER BY created_at DESC
+    `
+  );
+
+  const orders = result.rows.map(serializeOrder);
+
+  const productIds = [
+    ...new Set(
+      orders.flatMap((order) =>
+        (order.items || [])
+          .map((item) => item.product)
+          .filter((value) => typeof value === 'string' && value.length > 0)
+      )
+    )
+  ];
+
+  let productMap = new Map();
+  if (productIds.length) {
+    const productResult = await query(
+      'SELECT id, name, slug FROM products WHERE id = ANY($1::text[])',
+      [productIds]
+    );
+    productMap = new Map(productResult.rows.map((row) => [row.id, row]));
+  }
+
+  const populated = orders.map((order) => ({
+    ...order,
+    items: (order.items || []).map((item) => {
+      const product = productMap.get(item.product);
+      return {
+        ...item,
+        product: product
+          ? {
+              _id: product.id,
+              name: product.name,
+              slug: product.slug
+            }
+          : null
+      };
+    })
+  }));
+
+  res.json(populated);
 });
 
 export const updateOrderStatus = asyncHandler(async (req, res) => {
-  const order = await Order.findById(req.params.id);
-  if (!order) {
+  const nextStatus = req.body.status;
+  const allowed = ['Pending', 'Confirmed', 'Shipped', 'Delivered', 'Cancelled'];
+
+  if (!allowed.includes(nextStatus)) {
+    const error = new Error('Invalid order status');
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const result = await query(
+    `
+      UPDATE orders
+      SET status = $1, updated_at = NOW()
+      WHERE id = $2
+      RETURNING id, customer, shipping_address, items, total, payment_method, status, whatsapp_notified, created_at, updated_at
+    `,
+    [nextStatus, req.params.id]
+  );
+
+  if (result.rows.length === 0) {
     const error = new Error('Order not found');
     error.statusCode = 404;
     throw error;
   }
 
-  order.status = req.body.status || order.status;
-  await order.save();
-  res.json(order);
+  res.json(serializeOrder(result.rows[0]));
 });
 
 export const getAdminStats = asyncHandler(async (_req, res) => {
-  const [orders, products, lowStockProducts] = await Promise.all([
-    Order.find({}).lean(),
-    Product.countDocuments(),
-    Product.find({ sizes: { $elemMatch: { stock: { $lt: 3 } } } }, 'name sizes').lean()
+  const [ordersResult, productsResult, lowStockResult] = await Promise.all([
+    query('SELECT total, status FROM orders'),
+    query('SELECT COUNT(*)::int AS count FROM products'),
+    query(
+      `
+        SELECT id, name, sizes
+        FROM products
+        WHERE EXISTS (
+          SELECT 1
+          FROM jsonb_array_elements(sizes) AS size_entry
+          WHERE COALESCE((size_entry->>'stock')::int, 0) < 3
+        )
+      `
+    )
   ]);
 
+  const orders = ordersResult.rows;
   const revenue = orders
     .filter((order) => order.status !== 'Cancelled')
-    .reduce((sum, order) => sum + order.total, 0);
+    .reduce((sum, order) => sum + Number(order.total), 0);
+
+  const lowStockProducts = lowStockResult.rows.map((row) => ({
+    _id: row.id,
+    name: row.name,
+    sizes: row.sizes || []
+  }));
 
   res.json({
     revenue,
     totalOrders: orders.length,
-    totalProducts: products,
+    totalProducts: productsResult.rows[0]?.count || 0,
     lowStockCount: lowStockProducts.length,
     lowStockProducts
   });
