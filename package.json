@@ -1,0 +1,22 @@
+{
+  "name": "elitekicks",
+  "private": true,
+  "workspaces": [
+    "frontend",
+    "backend"
+  ],
+  "scripts": {
+    "dev:frontend": "npm --workspace frontend run dev",
+    "dev:backend": "npm --workspace backend run dev",
+    "dev:backend:memory": "npm --workspace backend run dev:memory",
+    "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev:memory": "concurrently \"npm run dev:backend:memory\" \"npm run dev:frontend\"",
+    "build": "npm --workspace frontend run build",
+    "smoke:memory": "npm --workspace backend run smoke:memory",
+    "seed": "npm --workspace backend run seed",
+    "seed:clear": "npm --workspace backend run seed:clear"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.2"
+  }
+}
