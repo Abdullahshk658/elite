@@ -1,8 +1,22 @@
 import { Pool } from 'pg';
 
+const cleanEnvValue = (value) => (typeof value === 'string' ? value.trim().replace(/^['"]|['"]$/g, '') : value);
+
+const toPositiveInt = (value, fallback) => {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+};
+
+const buildPoolTuningConfig = () => ({
+  connectionTimeoutMillis: toPositiveInt(process.env.DB_CONNECTION_TIMEOUT_MS, 5000),
+  idleTimeoutMillis: toPositiveInt(process.env.DB_IDLE_TIMEOUT_MS, 30000),
+  query_timeout: toPositiveInt(process.env.DB_QUERY_TIMEOUT_MS, 10000),
+  max: toPositiveInt(process.env.DB_POOL_MAX, process.env.VERCEL ? 2 : 10)
+});
+
 const buildPoolConfig = () => {
-  const databaseUrl = process.env.DATABASE_URL;
-  const host = process.env.DB_HOST;
+  const databaseUrl = cleanEnvValue(process.env.DATABASE_URL);
+  const host = cleanEnvValue(process.env.DB_HOST);
   const useSsl =
     process.env.DB_SSL === 'true' ||
     Boolean(
@@ -13,18 +27,32 @@ const buildPoolConfig = () => {
   if (databaseUrl) {
     return {
       connectionString: databaseUrl,
-      ssl: useSsl ? { rejectUnauthorized: false } : false
+      ssl: useSsl ? { rejectUnauthorized: false } : false,
+      ...buildPoolTuningConfig()
     };
   }
 
   return {
-    host: process.env.DB_HOST || '127.0.0.1',
+    host: host || '127.0.0.1',
     port: Number(process.env.DB_PORT) || 5432,
-    database: process.env.DB_NAME || 'postgres',
-    user: process.env.DB_USER || 'postgres',
-    password: process.env.DB_PASSWORD || '',
-    ssl: useSsl ? { rejectUnauthorized: false } : false
+    database: cleanEnvValue(process.env.DB_NAME) || 'postgres',
+    user: cleanEnvValue(process.env.DB_USER) || 'postgres',
+    password: cleanEnvValue(process.env.DB_PASSWORD) || '',
+    ssl: useSsl ? { rejectUnauthorized: false } : false,
+    ...buildPoolTuningConfig()
   };
+};
+
+const getDbHostForLogs = () => {
+  const databaseUrl = cleanEnvValue(process.env.DATABASE_URL);
+  if (databaseUrl) {
+    try {
+      return new URL(databaseUrl).hostname;
+    } catch {
+      return databaseUrl;
+    }
+  }
+  return cleanEnvValue(process.env.DB_HOST) || 'unknown-host';
 };
 
 const schemaSql = `
@@ -118,14 +146,20 @@ export const withTransaction = async (work) => {
 };
 
 export const connectDB = async () => {
-  const client = await getPool().connect();
+  let client;
 
   try {
+    client = await getPool().connect();
     await client.query('SELECT 1');
     await client.query(schemaSql);
     console.log('PostgreSQL connected');
+  } catch (error) {
+    if (error?.code === 'ENOTFOUND') {
+      console.error(`Database host could not be resolved: ${getDbHostForLogs()}`);
+    }
+    throw error;
   } finally {
-    client.release();
+    client?.release();
   }
 };
 
